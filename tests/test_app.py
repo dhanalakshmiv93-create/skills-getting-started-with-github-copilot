@@ -128,8 +128,100 @@ class TestSignup:
         )
         assert response.status_code == 200
 
+    def test_signup_at_max_capacity_fails(self, client):
+        """Test that signup fails when activity reaches maximum capacity."""
+        activity_name = "Chess Club"  # max_participants: 12, starts with 2
+        
+        # Fill to capacity (add 10 more participants)
+        for i in range(10):
+            email = f"participant{i}@example.com"
+            response = client.post(
+                f"/activities/{activity_name}/signup",
+                params={"email": email}
+            )
+            assert response.status_code == 200
+        
+        # Verify at max
+        activities_response = client.get("/activities")
+        current_count = len(activities_response.json()[activity_name]["participants"])
+        assert current_count == 12
+        
+        # Try to add one more - should fail
+        response = client.post(
+            f"/activities/{activity_name}/signup",
+            params={"email": "extra@example.com"}
+        )
+        assert response.status_code == 400
+        assert "maximum capacity" in response.json()["detail"].lower()
 
-class TestUnregister:
+
+class TestInputValidation:
+    """Tests for input validation on email and parameters."""
+
+    def test_signup_invalid_email_format(self, client):
+        """Test that signup rejects invalid email formats."""
+        activity_name = "Programming Class"
+        invalid_emails = ["invalid", "no@domain", "@domain.com", "user@", ""]
+        
+        for email in invalid_emails:
+            response = client.post(
+                f"/activities/{activity_name}/signup",
+                params={"email": email}
+            )
+            assert response.status_code == 422
+            assert "invalid email" in response.json()["detail"].lower()
+
+    def test_signup_missing_email_parameter(self, client):
+        """Test that signup returns 422 when email parameter is missing."""
+        activity_name = "Programming Class"
+        response = client.post(f"/activities/{activity_name}/signup")
+        assert response.status_code == 422
+
+    def test_signup_empty_email(self, client):
+        """Test that signup rejects empty email."""
+        activity_name = "Programming Class"
+        response = client.post(
+            f"/activities/{activity_name}/signup",
+            params={"email": ""}
+        )
+        assert response.status_code == 422
+
+    def test_unregister_invalid_email_format(self, client):
+        """Test that unregister rejects invalid email formats."""
+        activity_name = "Programming Class"
+        invalid_emails = ["invalid", "no@domain", "@domain.com", "user@", ""]
+        
+        for email in invalid_emails:
+            response = client.post(
+                f"/activities/{activity_name}/unregister",
+                params={"email": email}
+            )
+            assert response.status_code == 422
+            assert "invalid email" in response.json()["detail"].lower()
+
+    def test_unregister_missing_email_parameter(self, client):
+        """Test that unregister returns 422 when email parameter is missing."""
+        activity_name = "Programming Class"
+        response = client.post(f"/activities/{activity_name}/unregister")
+        assert response.status_code == 422
+
+    def test_signup_case_sensitive_activity_name(self, client, sample_email):
+        """Test that activity names are case sensitive."""
+        # "chess club" should not match "Chess Club"
+        response = client.post(
+            "/activities/chess%20club/signup",
+            params={"email": sample_email}
+        )
+        assert response.status_code == 404
+
+    def test_signup_activity_name_with_spaces(self, client, sample_email):
+        """Test that activity names with spaces work when URL encoded."""
+        # "Gym Class" should work
+        response = client.post(
+            "/activities/Gym%20Class/signup",
+            params={"email": sample_email}
+        )
+        assert response.status_code == 200
     """Tests for POST /activities/{activity_name}/unregister endpoint."""
 
     def test_unregister_successful(self, client):
@@ -257,3 +349,144 @@ class TestSignupUnregisterIntegration:
         # Verify in list
         activities = client.get("/activities").json()
         assert email in activities[activity_name]["participants"]
+
+
+class TestErrorHandling:
+    """Tests for error handling and HTTP method validation."""
+
+    def test_get_on_signup_endpoint_returns_405(self, client, sample_email):
+        """Test that GET on signup endpoint returns 405 Method Not Allowed."""
+        response = client.get(
+            "/activities/Chess%20Club/signup",
+            params={"email": sample_email}
+        )
+        assert response.status_code == 405
+
+    def test_put_on_signup_endpoint_returns_405(self, client, sample_email):
+        """Test that PUT on signup endpoint returns 405 Method Not Allowed."""
+        response = client.put(
+            "/activities/Chess%20Club/signup",
+            params={"email": sample_email}
+        )
+        assert response.status_code == 405
+
+    def test_delete_on_activities_endpoint_returns_405(self, client):
+        """Test that DELETE on activities endpoint returns 405."""
+        response = client.delete("/activities")
+        assert response.status_code == 405
+
+    def test_signup_response_format_consistency(self, client, sample_email):
+        """Test that signup responses have consistent format."""
+        response = client.post(
+            "/activities/Programming%20Class/signup",
+            params={"email": sample_email}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "message" in data
+        assert isinstance(data["message"], str)
+        assert sample_email in data["message"]
+        assert "Programming Class" in data["message"]
+
+    def test_error_responses_have_detail_field(self, client):
+        """Test that error responses include a detail field."""
+        # Test 404 for non-existent activity
+        response = client.post(
+            "/activities/Nonexistent/signup",
+            params={"email": "test@example.com"}
+        )
+        assert response.status_code == 404
+        assert "detail" in response.json()
+        assert isinstance(response.json()["detail"], str)
+
+
+class TestDataConsistency:
+    """Tests for data consistency and state management."""
+
+    def test_activities_state_resets_between_tests(self, client):
+        """Test that activities state is properly reset between tests."""
+        # This test relies on the reset_activities fixture
+        # Check that default participants are present
+        response = client.get("/activities")
+        activities = response.json()
+        
+        # Check a few known defaults
+        assert "michael@mergington.edu" in activities["Chess Club"]["participants"]
+        assert "emma@mergington.edu" in activities["Programming Class"]["participants"]
+        assert len(activities["Chess Club"]["participants"]) == 2  # Original count
+
+    def test_signup_does_not_affect_other_activities(self, client, sample_email):
+        """Test that signing up for one activity doesn't affect others."""
+        activity_name = "Art Club"
+        other_activity = "Drama Society"
+        
+        # Get initial counts
+        response_before = client.get("/activities")
+        before_counts = {
+            name: len(data["participants"]) 
+            for name, data in response_before.json().items()
+        }
+        
+        # Sign up for one activity
+        client.post(
+            f"/activities/{activity_name}/signup",
+            params={"email": sample_email}
+        )
+        
+        # Check other activities unchanged
+        response_after = client.get("/activities")
+        after_counts = {
+            name: len(data["participants"]) 
+            for name, data in response_after.json().items()
+        }
+        
+        for act_name in before_counts:
+            if act_name != activity_name:
+                assert before_counts[act_name] == after_counts[act_name]
+
+    def test_default_participant_counts(self, client):
+        """Test that activities have expected default participant counts."""
+        response = client.get("/activities")
+        activities = response.json()
+        
+        expected_counts = {
+            "Chess Club": 2,
+            "Programming Class": 2,
+            "Gym Class": 2,
+            "Basketball Team": 2,
+            "Swimming Club": 2,
+            "Art Club": 2,
+            "Drama Society": 2,
+            "Debate Team": 2,
+            "Robotics Workshop": 2
+        }
+        
+        for activity_name, expected_count in expected_counts.items():
+            assert len(activities[activity_name]["participants"]) == expected_count
+
+
+class TestStaticFiles:
+    """Tests for static file serving."""
+
+    def test_static_index_html_served(self, client):
+        """Test that /static/index.html is accessible."""
+        response = client.get("/static/index.html")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+
+    def test_static_app_js_served(self, client):
+        """Test that /static/app.js is accessible."""
+        response = client.get("/static/app.js")
+        assert response.status_code == 200
+        assert "javascript" in response.headers["content-type"]
+
+    def test_static_styles_css_served(self, client):
+        """Test that /static/styles.css is accessible."""
+        response = client.get("/static/styles.css")
+        assert response.status_code == 200
+        assert "text/css" in response.headers["content-type"]
+
+    def test_static_nonexistent_file_returns_404(self, client):
+        """Test that non-existent static files return 404."""
+        response = client.get("/static/nonexistent.txt")
+        assert response.status_code == 404
